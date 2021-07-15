@@ -34,7 +34,9 @@ public class ReflectUtils {
     private static final Map primitives = new HashMap(8);
     private static final Map transforms = new HashMap(8);
     private static final ClassLoader defaultLoader = ReflectUtils.class.getClassLoader();
-    private static Method DEFINE_CLASS, DEFINE_CLASS_UNSAFE;
+    private static Method DEFINE_CLASS, DEFINE_CLASS_UNSAFE, DEFINE_CLASS_LOOKUP;
+    private static Class mh;
+    private static Object lookupObject;
     private static final ProtectionDomain PROTECTION_DOMAIN;
     private static final Object UNSAFE;
     private static final Throwable THROWABLE;
@@ -68,22 +70,30 @@ public class ReflectUtils {
                 // Fallback on Jigsaw where this method is not available.
                 throwable = t;
                 defineClass = null;
-                unsafe = AccessController.doPrivileged(new PrivilegedExceptionAction() {
-                    public Object run() throws Exception {
-                        Class u = Class.forName("sun.misc.Unsafe");
-                        Field theUnsafe = u.getDeclaredField("theUnsafe");
-                        theUnsafe.setAccessible(true);
-                        return theUnsafe.get(null);
-                    }
-                });
-                Class u = Class.forName("sun.misc.Unsafe");
-                defineClassUnsafe = u.getMethod("defineClass",
-                                        new Class[]{ String.class,
-                                                     byte[].class,
-                                                     Integer.TYPE,
-                                                     Integer.TYPE,
-                                                     ClassLoader.class,
-                                                     ProtectionDomain.class });
+                try {
+                    unsafe = AccessController.doPrivileged(new PrivilegedExceptionAction() {
+                        public Object run() throws Exception {
+                            Class u = Class.forName("sun.misc.Unsafe");
+                            Field theUnsafe = u.getDeclaredField("theUnsafe");
+                            theUnsafe.setAccessible(true);
+                            return theUnsafe.get(null);
+                        }
+                    });
+                    Class u = Class.forName("sun.misc.Unsafe");
+                    defineClassUnsafe = u.getMethod("defineClass",
+                                            new Class[]{ String.class,
+                                                        byte[].class,
+                                                        Integer.TYPE,
+                                                        Integer.TYPE,
+                                                        ClassLoader.class,
+                                                        ProtectionDomain.class });
+                } catch(Throwable e) {
+                    defineClassUnsafe = null;
+                    unsafe = null;
+                    mh = Class.forName("java.lang.invoke.MethodHandles");
+                    lookupObject = mh.getMethod("lookup").invoke(null);
+                    DEFINE_CLASS_LOOKUP = lookupObject.getClass().getDeclaredMethod("defineClass", byte[].class);
+                }
             }
             AccessController.doPrivileged(new PrivilegedExceptionAction() {
                 public Object run() throws Exception {
@@ -460,6 +470,18 @@ public class ReflectUtils {
         } else if (DEFINE_CLASS_UNSAFE != null) {
             Object[] args = new Object[]{className, b, new Integer(0), new Integer(b.length), loader, protectionDomain };
             c = (Class)DEFINE_CLASS_UNSAFE.invoke(UNSAFE, args);
+        } else if (DEFINE_CLASS_LOOKUP != null) {
+            Object[] args = new Object[]{b};
+            try {
+                org.objectweb.asm.ClassReader reader = new org.objectweb.asm.ClassReader(b);
+                String clsName = reader.getClassName().replace("/",".");
+                Class packageClass = loader.loadClass(clsName.substring(0,clsName.indexOf("$$")).replace("Wicket_Proxy_",""));
+            Object privateLookup = mh.getMethod("privateLookupIn", Class.class, lookupObject.getClass()).invoke(null, new Object[]{packageClass,lookupObject});
+            c = (Class)DEFINE_CLASS_LOOKUP.invoke(privateLookup, args);
+            }catch(Throwable t) {
+                t.printStackTrace();
+                throw new CodeGenerationException(t);
+            }
         } else {
             throw new CodeGenerationException(THROWABLE);
         }
